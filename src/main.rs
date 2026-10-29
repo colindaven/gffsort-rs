@@ -59,7 +59,7 @@ fn run() -> Result<(), String> {
         None => None,
     };
 
-    let input_data = read_input(input.as_ref())?;
+    let input_data = read_input(input.as_deref())?;
     let mut parsed = parse_gff(input_data.as_deref(), &cli, input.as_deref())?;
 
     let mut chromosome_names = parsed.chromosomes;
