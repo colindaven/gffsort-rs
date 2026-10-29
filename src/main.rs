@@ -25,6 +25,9 @@ struct Cli {
 
     #[arg(long, action = clap::ArgAction::SetTrue, help = "Extract inline FASTA sequences to a .fasta file")]
     extract_fasta: bool,
+
+    #[arg(short = 'o', long, value_name = "OUTPUT", help = "Write sorted GFF3 to FILE instead of stdout")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,18 +63,34 @@ fn run() -> Result<(), String> {
     };
 
     let input_data = read_input(input.as_deref())?;
-    let mut parsed = parse_gff(input_data.as_deref(), &cli, input.as_deref())?;
+    let parsed = parse_gff(input_data.as_deref(), &cli, input.as_deref())?;
 
-    let mut chromosome_names = parsed.chromosomes;
+    let mut chromosome_names = parsed.chromosomes.clone();
     match chr_order {
         ChrOrder::Alphabet => chromosome_names.sort(),
         ChrOrder::Natural => chromosome_names.sort_by(|a, b| natural_cmp(a, b)),
         ChrOrder::Original => {}
     }
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    if let Some(path) = &cli.output {
+        let mut out = fs::File::create(path)
+            .map_err(|err| format!("Failed to create output file '{}': {err}", path.display()))?;
+        write_sorted_output(&mut out, &parsed, chromosome_names, &cli)?;
+    } else {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        write_sorted_output(&mut out, &parsed, chromosome_names, &cli)?;
+    }
 
+    Ok(())
+}
+
+fn write_sorted_output<W: Write>(
+    out: &mut W,
+    parsed: &ParsedGff,
+    chromosome_names: Vec<String>,
+    cli: &Cli,
+) -> Result<(), String> {
     for line in &parsed.pragma_lines {
         writeln!(out, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
     }
@@ -447,3 +466,4 @@ mod tests {
         assert_eq!(parsed.get("Parent").unwrap(), &vec!["gene1", "other"]);
     }
 }
+
