@@ -8,6 +8,12 @@ https://github.com/tao-bioinfo/gff3sort/blob/main/gff3sort.pl
 
 It keeps the same core behavior for sorting GFF3 records by chromosome and start position while preserving correct ordering for features that share the same chromosome and coordinate, especially in `--precise` mode where parent features are emitted before children.
 
+## Status
+Alpha, untested October 2026
+
+## WARNING - AI
+* Coded with Claude
+  
 ## Why this exists
 
 Tabix requires GFF3 files to be sorted by chromosome and start position. A naive sort can place parent features after their children when multiple records share the same coordinate, which breaks downstream display in tools such as JBrowse.
@@ -81,4 +87,4 @@ This Rust version mirrors the behavior and intent of the original Perl implement
 
 ## License
 
-This project is distributed under the GPL-3.0 license.
+This project is distributed under the GPL-3.0 license (inherited from the original repo).
