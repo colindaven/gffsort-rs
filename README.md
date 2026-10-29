@@ -18,7 +18,7 @@ This tool follows the same intent as the Perl reference script: group records by
 
 - Sorts GFF3 records by chromosome and start position
 - Supports chromosome ordering modes:
-  - `alphabet` (default)
+  - `alphabet` (default is `natural`)
   - `natural`
   - `original`
 - Supports `--precise` mode to order parent features before children when needed
@@ -72,7 +72,7 @@ cat input.gff3 | cargo run --release -- --chr_order natural --precise -o output.
     Write sorted GFF3 output to FILE instead of stdout.
 
 --chr_order <alphabet|natural|original>
-    Chromosome sort order. Default: alphabet
+    Chromosome sort order. Default: natural
 
 --precise
     Topologically sort records at the same chromosomal position so

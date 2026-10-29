@@ -17,7 +17,7 @@ struct Cli {
     #[arg(value_name = "INPUT", help = "Input GFF3 file; use '-' or omit for stdin")]
     input: Option<PathBuf>,
 
-    #[arg(long, default_value = "alphabet", help = "Chromosome order: alphabet, natural, or original")]
+    #[arg(long, default_value = "natural", help = "Chromosome order: alphabet, natural, or original")]
     chr_order: String,
 
     #[arg(long, action = clap::ArgAction::SetTrue, help = "Run in precise mode")]
@@ -436,6 +436,12 @@ fn parse_chunk(value: &str) -> NaturalChunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_chr_order_is_natural() {
+        let cli = Cli::try_parse_from(["gffsort-rs", "input.gff3"]).unwrap();
+        assert_eq!(cli.chr_order, "natural");
+    }
 
     #[test]
     fn natural_order_is_used_for_chromosomes() {
