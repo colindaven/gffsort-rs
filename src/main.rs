@@ -17,13 +17,13 @@ struct Cli {
     #[arg(value_name = "INPUT", help = "Input GFF3 file; use '-' or omit for stdin")]
     input: Option<PathBuf>,
 
-    #[arg(long, default_value = "natural", help = "Chromosome order: alphabet, natural, or original")]
+    #[arg(long = "chr_order", alias = "chr-order", visible_alias = "chr-order", default_value = "natural", help = "Chromosome order: alphabet, natural, or original")]
     chr_order: String,
 
     #[arg(long, action = clap::ArgAction::SetTrue, help = "Run in precise mode")]
     precise: bool,
 
-    #[arg(long, action = clap::ArgAction::SetTrue, help = "Extract inline FASTA sequences to a .fasta file")]
+    #[arg(long = "extract_FASTA", alias = "extract-fasta", alias = "extract_fasta", action = clap::ArgAction::SetTrue, help = "Extract inline FASTA sequences to a .fasta file")]
     extract_fasta: bool,
 
     #[arg(short = 'o', long, value_name = "OUTPUT", help = "Write sorted GFF3 to FILE instead of stdout")]
