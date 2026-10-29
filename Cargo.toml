@@ -1,0 +1,10 @@
+[package]
+name = "gffsort-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Colin Davenport"]
+description = "GFF3 sorting in Rust, ported from the Perl gff3sort.pl implementation"
+license = "GPL-3.0"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }

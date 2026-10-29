@@ -1,39 +1,45 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
-use std::env;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 
-const USAGE: &str = r#"gffsort-rs [OPTIONS] input.file.gff3 > output.sort.gff3
+use clap::Parser;
 
-Options:
-  --help
-  --precise           Run in precise mode, keeping parent features before children when they share a start position.
-  --chr_order VALUE   Select chromosome ordering: alphabet, natural, original [default: alphabet]
-  --extract_FASTA     Extract inline FASTA sequences to a sibling .fasta file.
-"#;
+#[derive(Debug, Parser)]
+#[command(
+    name = "gffsort-rs",
+    version,
+    about = "Sort GFF3 files for tabix indexing",
+    long_about = "Sort GFF3 files for tabix indexing. Outputs to stdout by default."
+)]
+struct Cli {
+    #[arg(value_name = "INPUT", help = "Input GFF3 file; use '-' or omit for stdin")]
+    input: Option<PathBuf>,
 
-#[derive(Clone, Copy, Debug)]
+    #[arg(long, default_value = "alphabet", help = "Chromosome order: alphabet, natural, or original")]
+    chr_order: String,
+
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Run in precise mode")]
+    precise: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Extract inline FASTA sequences to a .fasta file")]
+    extract_fasta: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChrOrder {
     Alphabet,
     Natural,
     Original,
 }
 
-#[derive(Debug)]
-struct Options {
-    help: bool,
-    precise: bool,
-    chr_order: ChrOrder,
-    extract_fasta: bool,
-}
-
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ParsedGff {
     chromosomes: Vec<String>,
     records_by_chr: HashMap<String, HashMap<u64, Vec<String>>>,
     fasta: String,
+    pragma_lines: Vec<String>,
 }
 
 fn main() {
@@ -44,67 +50,37 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let mut args = env::args().skip(1);
-    let mut options = Options {
-        help: false,
-        precise: false,
-        chr_order: ChrOrder::Alphabet,
-        extract_fasta: false,
+    let cli = Cli::parse();
+    let chr_order = parse_chr_order(&cli.chr_order)?;
+
+    let input = match cli.input.as_deref() {
+        Some(path) if path == Path::new("-") => None,
+        Some(path) => Some(path.to_path_buf()),
+        None => None,
     };
-    let mut input: Option<PathBuf> = None;
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--help" => options.help = true,
-            "--precise" => options.precise = true,
-            "--extract_FASTA" => options.extract_fasta = true,
-            "--chr_order" => {
-                let value = args.next().ok_or_else(|| "Missing value for --chr_order".to_string())?;
-                let order = match value.to_ascii_lowercase().as_str() {
-                    "alphabet" => ChrOrder::Alphabet,
-                    "natural" => ChrOrder::Natural,
-                    "original" => ChrOrder::Original,
-                    other => {
-                        return Err(format!(
-                            "Unknown option: --chr_order={}. Only [alphabet] [natural] [original] are allowed",
-                            other
-                        ));
-                    }
-                };
-                options.chr_order = order;
-            }
-            other if other.starts_with("--") => {
-                return Err(format!("Unknown option: {other}"));
-            }
-            other => {
-                if input.is_some() {
-                    return Err("Expected a single input file path".to_string());
-                }
-                input = Some(PathBuf::from(other));
-            }
-        }
-    }
-
-    if options.help {
-        print!("{USAGE}");
-        return Ok(());
-    }
-
-    let input_path = input.ok_or_else(|| "Missing input file".to_string())?;
-    let parsed = parse_gff(&input_path, &options)?;
+    let input_data = read_input(input.as_ref())?;
+    let mut parsed = parse_gff(input_data.as_deref(), &cli, input.as_deref())?;
 
     let mut chromosome_names = parsed.chromosomes;
-    match options.chr_order {
+    match chr_order {
         ChrOrder::Alphabet => chromosome_names.sort(),
         ChrOrder::Natural => chromosome_names.sort_by(|a, b| natural_cmp(a, b)),
         ChrOrder::Original => {}
     }
 
-    let mut output = io::stdout().lock();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    for line in &parsed.pragma_lines {
+        writeln!(out, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
+    }
+
     for chr in chromosome_names {
         let Some(positions) = parsed.records_by_chr.get(&chr) else {
             continue;
         };
+
         let mut sorted_positions: Vec<u64> = positions.keys().copied().collect();
         sorted_positions.sort_unstable();
 
@@ -114,18 +90,18 @@ fn run() -> Result<(), String> {
             };
 
             if lines.len() == 1 {
-                writeln!(output, "{}", lines[0]).map_err(|e| format!("Failed writing output: {e}"))?;
+                writeln!(out, "{}", lines[0]).map_err(|e| format!("Failed writing output: {e}"))?;
                 continue;
             }
 
-            if options.precise {
+            if cli.precise {
                 let sorted_lines = topo_sort_same_position(lines);
                 for line in sorted_lines {
-                    writeln!(output, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
+                    writeln!(out, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
                 }
             } else {
                 for line in lines {
-                    writeln!(output, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
+                    writeln!(out, "{line}").map_err(|e| format!("Failed writing output: {e}"))?;
                 }
             }
         }
@@ -134,14 +110,50 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_gff(input_path: &PathBuf, options: &Options) -> Result<ParsedGff, String> {
+fn parse_chr_order(value: &str) -> Result<ChrOrder, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "alphabet" => Ok(ChrOrder::Alphabet),
+        "natural" => Ok(ChrOrder::Natural),
+        "original" => Ok(ChrOrder::Original),
+        other => Err(format!(
+            "Unknown option: --chr_order={}. Only [alphabet] [natural] [original] are allowed",
+            other
+        )),
+    }
+}
+
+fn read_input(input_path: Option<&Path>) -> Result<Option<String>, String> {
+    match input_path {
+        Some(path) if path == Path::new("-") => {
+            let mut buffer = String::new();
+            io::stdin()
+                .lock()
+                .read_to_string(&mut buffer)
+                .map_err(|err| format!("Failed to read stdin: {err}"))?;
+            Ok(Some(buffer))
+        }
+        Some(path) => {
+            fs::read_to_string(path)
+                .map(Some)
+                .map_err(|err| format!("Failed to read input file '{}': {err}", path.display()))
+        }
+        None => {
+            let mut buffer = String::new();
+            io::stdin()
+                .lock()
+                .read_to_string(&mut buffer)
+                .map_err(|err| format!("Failed to read stdin: {err}"))?;
+            Ok(Some(buffer))
+        }
+    }
+}
+
+fn parse_gff(input: Option<&str>, cli: &Cli, input_path: Option<&Path>) -> Result<ParsedGff, String> {
     let mut parsed = ParsedGff::default();
     let mut encountered_fasta = false;
+    let input = input.unwrap_or("");
 
-    let contents = fs::read_to_string(input_path)
-        .map_err(|e| format!("Failed to read input file '{}': {e}", input_path.display()))?;
-
-    for raw_line in contents.lines() {
+    for raw_line in input.lines() {
         let line = raw_line.trim_end_matches('\r');
 
         if line == "##FASTA" {
@@ -150,7 +162,7 @@ fn parse_gff(input_path: &PathBuf, options: &Options) -> Result<ParsedGff, Strin
         }
 
         if encountered_fasta {
-            if options.extract_fasta && line != "##FASTA" {
+            if cli.extract_fasta && line != "##FASTA" {
                 parsed.fasta.push_str(line);
                 parsed.fasta.push('\n');
             }
@@ -161,12 +173,12 @@ fn parse_gff(input_path: &PathBuf, options: &Options) -> Result<ParsedGff, Strin
             if line.chars().all(|ch| ch == '#') {
                 continue;
             }
-            println!("{line}");
+            parsed.pragma_lines.push(line.to_string());
             continue;
         }
 
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 4 {
+        if fields.len() < 9 {
             continue;
         }
 
@@ -184,14 +196,25 @@ fn parse_gff(input_path: &PathBuf, options: &Options) -> Result<ParsedGff, Strin
         }
     }
 
-    if options.extract_fasta && !parsed.fasta.trim().is_empty() {
-        let fasta_path = format!("{}{}.fasta", input_path.to_string_lossy(), "");
+    if cli.extract_fasta && !parsed.fasta.trim().is_empty() {
+        let fasta_path = fasta_output_path(input_path);
         fs::write(&fasta_path, &parsed.fasta)
-            .map_err(|e| format!("Failed to write extracted FASTA to '{}': {e}", fasta_path))?;
-        eprintln!("The inline FASTA sequences were extracted to file {}", fasta_path);
+            .map_err(|err| format!("Failed to write extracted FASTA to '{}': {err}", fasta_path.display()))?;
+        eprintln!("The inline FASTA sequences were extracted to file {}", fasta_path.display());
     }
 
     Ok(parsed)
+}
+
+fn fasta_output_path(input_path: Option<&Path>) -> PathBuf {
+    match input_path {
+        Some(path) if path != Path::new("-") => {
+            let mut out = path.to_path_buf();
+            out.set_extension("fasta");
+            out
+        }
+        _ => PathBuf::from("stdin.fasta"),
+    }
 }
 
 fn topo_sort_same_position(lines: &[String]) -> Vec<String> {
@@ -201,15 +224,12 @@ fn topo_sort_same_position(lines: &[String]) -> Vec<String> {
 
     for line in lines {
         let attrs = line.rsplit_once('\t').map_or("", |(_, attrs)| attrs);
-        let id = extract_attribute(attrs, "ID");
-        let parents = extract_attribute_values(attrs, "Parent");
+        let attributes = parse_attributes(attrs);
 
-        let key = if let Some(ref id_value) = id {
-            id_value.clone()
-        } else {
-            line.clone()
-        };
+        let id = attributes.get("ID").and_then(|values| values.first().cloned());
+        let parents = attributes.get("Parent").cloned().unwrap_or_default();
 
+        let key = id.clone().unwrap_or_else(|| line.clone());
         if !id_to_line.contains_key(&key) {
             node_order.push(key.clone());
         }
@@ -231,32 +251,30 @@ fn topo_sort_same_position(lines: &[String]) -> Vec<String> {
 }
 
 fn topo_sort(node_order: &[String], parent_to_children: &HashMap<String, Vec<String>>) -> Vec<String> {
-    let mut child_to_parents: HashMap<String, Vec<String>> = HashMap::new();
     let mut indegree: HashMap<String, usize> = HashMap::new();
-    let mut nodes: Vec<String> = Vec::new();
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut all_nodes: HashSet<String> = HashSet::new();
 
     for node in node_order {
         indegree.insert(node.clone(), 0);
-        nodes.push(node.clone());
+        all_nodes.insert(node.clone());
     }
 
     for (parent, children) in parent_to_children {
         for child in children {
+            all_nodes.insert(child.clone());
             if !indegree.contains_key(child) {
                 indegree.insert(child.clone(), 0);
-                nodes.push(child.clone());
             }
-            child_to_parents
-                .entry(child.clone())
-                .or_default()
-                .push(parent.clone());
+
+            children_map.entry(parent.clone()).or_default().push(child.clone());
             *indegree.get_mut(child).unwrap() += 1;
         }
     }
 
-    let mut queue = VecDeque::new();
-    for node in &nodes {
-        if indegree.get(node) == Some(&0) {
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for node in &all_nodes {
+        if indegree.get(node).copied().unwrap_or(0) == 0 {
             queue.push_back(node.clone());
         }
     }
@@ -264,7 +282,8 @@ fn topo_sort(node_order: &[String], parent_to_children: &HashMap<String, Vec<Str
     let mut result = Vec::new();
     while let Some(node) = queue.pop_front() {
         result.push(node.clone());
-        if let Some(children) = parent_to_children.get(&node) {
+
+        if let Some(children) = children_map.get(&node) {
             for child in children {
                 let deg = indegree.get_mut(child).unwrap();
                 *deg = deg.saturating_sub(1);
@@ -275,10 +294,12 @@ fn topo_sort(node_order: &[String], parent_to_children: &HashMap<String, Vec<Str
         }
     }
 
-    if result.len() != nodes.len() {
-        for node in &nodes {
-            if !result.contains(node) {
-                result.push(node.clone());
+    if result.len() != all_nodes.len() {
+        let mut remaining: Vec<String> = all_nodes.iter().cloned().collect();
+        remaining.sort();
+        for node in remaining {
+            if !result.contains(&node) {
+                result.push(node);
             }
         }
     }
@@ -286,68 +307,78 @@ fn topo_sort(node_order: &[String], parent_to_children: &HashMap<String, Vec<Str
     result
 }
 
-fn extract_attribute(attrs: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    for part in attrs.split(';') {
-        if let Some(value) = part.strip_prefix(&prefix) {
-            return Some(value.trim().to_string());
+fn parse_attributes(attributes: &str) -> HashMap<String, Vec<String>> {
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
+    for part in attributes.split(';') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-    }
-    None
-}
 
-fn extract_attribute_values(attrs: &str, key: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let prefix = format!("{key}=");
-    for part in attrs.split(';') {
-        if let Some(value) = part.strip_prefix(&prefix) {
-            for candidate in value.split(',') {
-                let cleaned = candidate.trim();
-                if !cleaned.is_empty() {
-                    values.push(cleaned.to_string());
-                }
-            }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            continue;
         }
+
+        let entries: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        if entries.is_empty() {
+            continue;
+        }
+
+        result.insert(key.to_string(), entries);
     }
-    values
+    result
 }
 
 fn natural_cmp(a: &str, b: &str) -> Ordering {
     let a_parts = split_natural(a);
     let b_parts = split_natural(b);
+
     for (left, right) in a_parts.iter().zip(b_parts.iter()) {
         match left.cmp(right) {
             Ordering::Equal => {}
             other => return other,
         }
     }
+
     a_parts.len().cmp(&b_parts.len())
 }
 
 fn split_natural(value: &str) -> Vec<NaturalChunk> {
-    let mut result = Vec::new();
+    let mut parts = Vec::new();
     let mut current = String::new();
-    let mut last_is_digit = None;
+    let mut last_was_digit = None;
 
     for ch in value.chars() {
         let is_digit = ch.is_ascii_digit();
-        if last_is_digit == Some(is_digit) {
+        if last_was_digit == Some(is_digit) {
             current.push(ch);
         } else {
             if !current.is_empty() {
-                result.push(parse_chunk(&current));
+                parts.push(parse_chunk(&current));
             }
             current.clear();
             current.push(ch);
-            last_is_digit = Some(is_digit);
+            last_was_digit = Some(is_digit);
         }
     }
 
     if !current.is_empty() {
-        result.push(parse_chunk(&current));
+        parts.push(parse_chunk(&current));
     }
 
-    result
+    parts
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,7 +396,9 @@ impl PartialOrd for NaturalChunk {
 impl Ord for NaturalChunk {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (NaturalChunk::Text(left), NaturalChunk::Text(right)) => left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()),
+            (NaturalChunk::Text(left), NaturalChunk::Text(right)) => {
+                left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+            }
             (NaturalChunk::Number(left), NaturalChunk::Number(right)) => left.cmp(right),
             (NaturalChunk::Text(_), NaturalChunk::Number(_)) => Ordering::Greater,
             (NaturalChunk::Number(_), NaturalChunk::Text(_)) => Ordering::Less,
@@ -393,9 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn precise_mode_respects_parent_before_child() {
+    fn precise_mode_keeps_parents_before_children() {
         let lines = vec![
-            "chr1\t.	gene\t1\t10\t.\t+\t.\tID=gene1".to_string(),
+            "chr1\t.\tgene\t1\t10\t.\t+\t.\tID=gene1".to_string(),
             "chr1\t.\ttranscript\t1\t10\t.\t+\t.\tParent=gene1;ID=tx1".to_string(),
             "chr1\t.\texon\t1\t10\t.\t+\t.\tParent=tx1;ID=exon1".to_string(),
         ];
@@ -405,5 +438,209 @@ mod tests {
         assert_eq!(sorted[1], lines[1]);
         assert_eq!(sorted[2], lines[2]);
     }
+
+    #[test]
+    fn parses_gff_attributes_with_spaces() {
+        let attrs = "ID=gene1; Name=gene one; Parent=gene1,other";
+        let parsed = parse_attributes(attrs);
+        assert_eq!(parsed.get("Name").unwrap()[0], "gene one");
+        assert_eq!(parsed.get("Parent").unwrap(), &vec!["gene1", "other"]);
+    }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ "
